@@ -36,6 +36,10 @@ jobs:
           static int launches = 0;
           static int cancels = 0;
 
+          static void zero_impl(volatile void *p, size_t n)
+          { volatile unsigned char *q = p; while (n--) *q++ = 0; }
+          void (* volatile insecure_memzero_ptr)(volatile void *, size_t) = zero_impl;
+
           ssize_t logging_printf(struct logging_file *f, const char *fmt, ...)
           { (void)f; (void)fmt; return 0; }
 
