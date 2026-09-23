@@ -1,0 +1,129 @@
+name: Kivaloo protocol parser fuzz
+
+on:
+  push:
+    paths:
+      - '.github/workflows/kivaloo-parser-fuzz.yml'
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: s3
+            src: lib/proto_s3/proto_s3_server.c
+            func: proto_s3_request_parse
+            req: proto_s3_request
+            header: lib/proto_s3/proto_s3.h
+            cleanup: proto_s3_request_free(&R);
+          - name: kvlds
+            src: lib/proto_kvlds/proto_kvlds_server.c
+            func: proto_kvlds_request_parse
+            req: proto_kvlds_request
+            header: lib/proto_kvlds/proto_kvlds.h
+            cleanup: ""
+          - name: lbs
+            src: lib/proto_lbs/proto_lbs_server.c
+            func: proto_lbs_request_parse
+            req: proto_lbs_request
+            header: lib/proto_lbs/proto_lbs.h
+            cleanup: if (R.type == PROTO_LBS_APPEND) free(R.r.append.buf);
+          - name: ddbkv
+            src: lib/proto_dynamodb_kv/proto_dynamodb_kv_server.c
+            func: proto_dynamodb_kv_request_parse
+            req: proto_ddbkv_request
+            header: lib/proto_dynamodb_kv/proto_dynamodb_kv.h
+            cleanup: proto_dynamodb_kv_request_free(&R);
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Clone current Kivaloo
+        run: |
+          git clone --depth 1 https://github.com/Tarsnap/kivaloo.git
+          cd kivaloo
+          git rev-parse HEAD
+
+      - name: Expose only target static parser
+        env:
+          SRC: ${{ matrix.target.src }}
+          FUNC: ${{ matrix.target.func }}
+        run: |
+          cd kivaloo
+          python3 - <<'PY'
+          import os, re
+          p=os.environ["SRC"]
+          s=open(p).read()
+          fn=os.environ["FUNC"]
+          pat=r"static int\s*\n"+re.escape(fn)+r"\s*\("
+          ns,n=re.subn(pat, "int\n"+fn+"(", s, count=1)
+          if n != 1:
+              raise SystemExit(f"failed to expose {fn}: {n}")
+          open("/tmp/target.c","w").write(ns)
+          PY
+
+      - name: Build libFuzzer harness
+        env:
+          FUNC: ${{ matrix.target.func }}
+          REQ: ${{ matrix.target.req }}
+          HEADER: ${{ matrix.target.header }}
+          CLEANUP: ${{ matrix.target.cleanup }}
+        run: |
+          cd kivaloo
+          cat > /tmp/fuzz.c <<EOF
+          #include <stddef.h>
+          #include <stdint.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include "lib/wire/wire.h"
+          #include "$HEADER"
+
+          int $FUNC(const struct wire_packet *, struct $REQ *);
+
+          int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+              struct wire_packet P;
+              struct $REQ R;
+              memset(&R, 0, sizeof(R));
+              P.ID = 1;
+              P.len = Size;
+              P.buf = (uint8_t *)(uintptr_t)Data;
+              if ($FUNC(&P, &R) == 0) {
+                  $CLEANUP
+              }
+              return 0;
+          }
+          EOF
+
+          clang -O1 -g -ffunction-sections -fdata-sections \
+            -fsanitize=fuzzer,address,undefined \
+            -fno-omit-frame-pointer \
+            -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
+            -I. -Ilib/datastruct -Ilib/wire -Ilibcperciva/util \
+            -c /tmp/target.c -o /tmp/target.o
+
+          clang -O1 -g -ffunction-sections -fdata-sections \
+            -fsanitize=fuzzer,address,undefined \
+            -fno-omit-frame-pointer \
+            -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
+            -I. -Ilib/datastruct -Ilib/wire -Ilibcperciva/util \
+            -c /tmp/fuzz.c -o /tmp/fuzz.o
+
+          clang -fsanitize=fuzzer,address,undefined \
+            -Wl,--gc-sections /tmp/fuzz.o /tmp/target.o \
+            -o /tmp/fuzzer
+
+      - name: Fuzz parser
+        env:
+          ASAN_OPTIONS: abort_on_error=1:detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          mkdir -p /tmp/corpus /tmp/artifacts
+          printf '\x00\x00\x00\x00' > /tmp/corpus/zero
+          head -c 256 /dev/zero > /tmp/corpus/zeros256
+          /tmp/fuzzer /tmp/corpus \
+            -artifact_prefix=/tmp/artifacts/ \
+            -max_total_time=90 \
+            -timeout=3 \
+            -rss_limit_mb=2048 \
+            -print_final_stats=1
