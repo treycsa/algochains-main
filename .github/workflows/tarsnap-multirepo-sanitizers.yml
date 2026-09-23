@@ -26,8 +26,15 @@ jobs:
           cd target
           export CC=clang
           export CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer'
-          export LDFLAGS='-fsanitize=address,undefined'
-          make -j2
+          if [ "${{ matrix.repo }}" = "scrypt" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq autoconf-archive libtool
+            autoreconf -i
+            ./configure CC=clang CFLAGS="$CFLAGS" LDFLAGS='-fsanitize=address,undefined'
+            make -j2
+          else
+            make -j2 CC=clang CFLAGS="$CFLAGS" LDADD_EXTRA='-fsanitize=address,undefined'
+          fi
 
       - name: Run tests and collect sanitizer diagnostics
         env:
@@ -35,8 +42,9 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
         run: |
           cd target
-          export CC=clang
-          export CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer'
-          export LDFLAGS='-fsanitize=address,undefined'
-          make test || true
+          if [ "${{ matrix.repo }}" = "scrypt" ]; then
+            make test || true
+          else
+            make test CC=clang CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' LDADD_EXTRA='-fsanitize=address,undefined' || true
+          fi
           echo "===== SANITIZER_SWEEP_COMPLETE:${{ matrix.repo }} ====="
