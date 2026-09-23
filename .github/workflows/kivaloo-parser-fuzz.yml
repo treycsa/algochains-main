@@ -17,7 +17,7 @@ jobs:
             func: proto_s3_request_parse
             req: proto_s3_request
             header: lib/proto_s3/proto_s3.h
-            cleanup: proto_s3_request_free(&R);
+            cleanup: if (R.type == PROTO_S3_PUT) free(R.r.put.buf); free(R.object); free(R.bucket);
           - name: kvlds
             src: lib/proto_kvlds/proto_kvlds_server.c
             func: proto_kvlds_request_parse
@@ -35,7 +35,7 @@ jobs:
             func: proto_dynamodb_kv_request_parse
             req: proto_ddbkv_request
             header: lib/proto_dynamodb_kv/proto_dynamodb_kv.h
-            cleanup: proto_dynamodb_kv_request_free(&R);
+            cleanup: if (R.type == PROTO_DDBKV_ICAS) free(R.buf2); if ((R.type == PROTO_DDBKV_ICAS) || (R.type == PROTO_DDBKV_CREATE) || (R.type == PROTO_DDBKV_PUT)) free(R.buf); free(R.key);
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -56,10 +56,30 @@ jobs:
           p=os.environ["SRC"]
           s=open(p).read()
           fn=os.environ["FUNC"]
-          pat=r"static int\s*\n"+re.escape(fn)+r"\s*\("
-          ns,n=re.subn(pat, "int\n"+fn+"(", s, count=1)
-          if n != 1:
-              raise SystemExit(f"failed to expose {fn}: {n}")
+
+          m=re.search(r"static int\s*\n"+re.escape(fn)+r"\s*\(", s)
+          if not m:
+              raise SystemExit(f"failed to find {fn}")
+
+          brace=s.find("{", m.end())
+          if brace < 0:
+              raise SystemExit("opening brace not found")
+
+          depth=0
+          end=None
+          for i in range(brace, len(s)):
+              ch=s[i]
+              if ch=="{":
+                  depth += 1
+              elif ch=="}":
+                  depth -= 1
+                  if depth==0:
+                      end=i+1
+                      break
+          if end is None:
+              raise SystemExit("closing brace not found")
+
+          ns=s[:m.start()] + "int\n" + s[m.end()-1:end] + "\n"
           open("/tmp/target.c","w").write(ns)
           PY
 
@@ -80,6 +100,9 @@ jobs:
           #include "$HEADER"
 
           int $FUNC(const struct wire_packet *, struct $REQ *);
+
+          void libcperciva_warn(const char *fmt, ...) { (void)fmt; }
+          void libcperciva_warnx(const char *fmt, ...) { (void)fmt; }
 
           int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
               struct wire_packet P;
