@@ -1,0 +1,42 @@
+name: Tarsnap multi-repo sanitizer sweep
+
+on:
+  push:
+    paths:
+      - '.github/workflows/tarsnap-multirepo-sanitizers.yml'
+  workflow_dispatch:
+
+jobs:
+  sanitizer:
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: [spiped, scrypt]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Clone target
+        run: |
+          git clone --depth 1 "https://github.com/Tarsnap/${{ matrix.repo }}.git" target
+          cd target
+          git rev-parse HEAD
+
+      - name: Build under ASan and UBSan
+        run: |
+          cd target
+          export CC=clang
+          export CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer'
+          export LDFLAGS='-fsanitize=address,undefined'
+          make -j2
+
+      - name: Run tests and collect sanitizer diagnostics
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=0:abort_on_error=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
+        run: |
+          cd target
+          export CC=clang
+          export CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer'
+          export LDFLAGS='-fsanitize=address,undefined'
+          make test || true
+          echo "===== SANITIZER_SWEEP_COMPLETE:${{ matrix.repo }} ====="
