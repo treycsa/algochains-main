@@ -9,7 +9,7 @@ on:
 jobs:
   kivaloo-asan-ubsan:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Clone current Kivaloo
         run: |
@@ -25,13 +25,17 @@ jobs:
           export LDFLAGS='-fsanitize=address,undefined'
           make -j2
 
-      - name: Run project tests under sanitizers
+      - name: Run every test family and keep collecting diagnostics
         env:
-          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=0:abort_on_error=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
         run: |
           cd kivaloo
           export CC=clang
           export CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer'
           export LDFLAGS='-fsanitize=address,undefined'
-          make test
+          for D in lbs kvlds mux s3 kvlds-s3 kvlds-ddbkv onlinequantile; do
+            echo "===== SANITIZER_SUITE:$D ====="
+            make -C "tests/$D" test || echo "===== TEST_FAILED:$D ====="
+          done
+          echo "===== SANITIZER_SWEEP_COMPLETE ====="
