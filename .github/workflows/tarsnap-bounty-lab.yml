@@ -1,0 +1,147 @@
+name: Tarsnap bounty lab
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  kivaloo-reqsip-repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone current Kivaloo
+        run: |
+          git clone --depth 1 https://github.com/Tarsnap/kivaloo.git
+          cd kivaloo
+          git rev-parse HEAD
+
+      - name: Build deterministic reqsip flush reproduction
+        run: |
+          cd kivaloo
+          cat > repro_reqqueue.c <<'EOF'
+          #include <stdarg.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/types.h>
+          #include <sys/time.h>
+
+          struct s3_serverpool { int dummy; };
+          struct sock_addr { int dummy; };
+
+          #include "lib/s3/s3_request_queue.c"
+
+          static int launches = 0;
+          static int cancels = 0;
+
+          ssize_t logging_printf(struct logging_file *f, const char *fmt, ...)
+          { (void)f; (void)fmt; return 0; }
+
+          int monoclock_get(struct timeval *tv)
+          { tv->tv_sec = 1; tv->tv_usec = 0; return 0; }
+
+          char * sock_addr_prettyprint(const struct sock_addr *sa)
+          { (void)sa; return strdup("stub"); }
+
+          void sock_addr_free(struct sock_addr *sa)
+          { free(sa); }
+
+          void insecure_memzero(void *p, size_t n)
+          { volatile unsigned char *q = p; while (n--) *q++ = 0; }
+
+          struct s3_serverpool * s3_serverpool_init(void)
+          { return calloc(1, sizeof(struct s3_serverpool)); }
+
+          int s3_serverpool_add(struct s3_serverpool *sp,
+              const struct sock_addr *sa, int ttl)
+          { (void)sp; (void)sa; (void)ttl; return 0; }
+
+          struct sock_addr * s3_serverpool_pick(struct s3_serverpool *sp)
+          { (void)sp; return calloc(1, sizeof(struct sock_addr)); }
+
+          void s3_serverpool_free(struct s3_serverpool *sp)
+          { free(sp); }
+
+          void * s3_request(struct sock_addr * const *addrs,
+              const char *key_id, const char *key_secret, const char *region,
+              struct s3_request *request, size_t maxrlen,
+              int (*callback)(void *, struct http_response *), void *cookie)
+          {
+              (void)addrs; (void)key_id; (void)key_secret; (void)region;
+              (void)request; (void)maxrlen; (void)callback; (void)cookie;
+              launches++;
+              return (void *)(uintptr_t)(0x1000 + launches);
+          }
+
+          void http_request_cancel(void *cookie)
+          { (void)cookie; cancels++; }
+
+          static int response_cb(void *cookie, struct http_response *res)
+          { (void)cookie; (void)res; return 0; }
+
+          int main(void)
+          {
+              struct s3_request_queue *Q;
+              struct s3_request req = {
+                  .method = "GET",
+                  .bucket = "test",
+                  .path = "/object",
+                  .nheaders = 0,
+                  .headers = NULL,
+                  .bodylen = 0,
+                  .body = NULL
+              };
+
+              Q = s3_request_queue_init("id", "secret", "region", 1);
+              if (Q == NULL) return 10;
+
+              if (s3_request_queue(Q, &req, 0, response_cb, NULL))
+                  return 11;
+              printf("after first queue: launches=%d reqsip=%zu ip=%p queued=%p\n",
+                  launches, Q->reqsip, (void *)Q->reqs_ip_head,
+                  (void *)Q->reqs_queued_head);
+
+              if (launches != 1 || Q->reqsip != 1 || Q->reqs_ip_head == NULL)
+                  return 12;
+
+              s3_request_queue_flush(Q);
+              printf("after flush: cancels=%d reqsip=%zu ip=%p queued=%p\n",
+                  cancels, Q->reqsip, (void *)Q->reqs_ip_head,
+                  (void *)Q->reqs_queued_head);
+
+              if (cancels != 1 || Q->reqs_ip_head != NULL)
+                  return 13;
+
+              if (s3_request_queue(Q, &req, 0, response_cb, NULL))
+                  return 14;
+              printf("after second queue: launches=%d reqsip=%zu ip=%p queued=%p\n",
+                  launches, Q->reqsip, (void *)Q->reqs_ip_head,
+                  (void *)Q->reqs_queued_head);
+
+              if (Q->reqsip == 1 && Q->reqs_ip_head == NULL &&
+                  Q->reqs_queued_head != NULL && launches == 1) {
+                  puts("BUG_REPRODUCED: flush left a phantom in-progress slot; "
+                       "the next request is queued but cannot launch.");
+                  s3_request_queue_free(Q);
+                  return 0;
+              }
+
+              puts("BUG_NOT_REPRODUCED");
+              s3_request_queue_free(Q);
+              return 1;
+          }
+          EOF
+
+          cc -std=c11 -Wall -Wextra -Werror \
+            -D_POSIX_C_SOURCE=200809L \
+            -I. -Ilib/s3 -Ilib/logging \
+            -Ilibcperciva/http -Ilibcperciva/util \
+            -Ilibcperciva/network -Ilibcperciva/events \
+            repro_reqqueue.c -o repro_reqqueue
+
+      - name: Run reproduction
+        run: |
+          cd kivaloo
+          ./repro_reqqueue
