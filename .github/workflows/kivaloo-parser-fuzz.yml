@@ -99,14 +99,14 @@ jobs:
             -fsanitize=fuzzer,address,undefined \
             -fno-omit-frame-pointer \
             -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
-            -I. -Ilib/datastruct -Ilib/wire -Ilibcperciva/util \
+            -I. -Ilib/datastruct -Ilib/wire -Ilibcperciva/util -Ilibcperciva/datastruct -Ilib/proto_s3 -Ilib/proto_lbs -Ilib/proto_kvlds -Ilib/proto_dynamodb_kv \
             -c /tmp/target.c -o /tmp/target.o
 
           clang -O1 -g -ffunction-sections -fdata-sections \
             -fsanitize=fuzzer,address,undefined \
             -fno-omit-frame-pointer \
             -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
-            -I. -Ilib/datastruct -Ilib/wire -Ilibcperciva/util \
+            -I. -Ilib/datastruct -Ilib/wire -Ilibcperciva/util -Ilibcperciva/datastruct -Ilib/proto_s3 -Ilib/proto_lbs -Ilib/proto_kvlds -Ilib/proto_dynamodb_kv \
             -c /tmp/fuzz.c -o /tmp/fuzz.o
 
           clang -fsanitize=fuzzer,address,undefined \
